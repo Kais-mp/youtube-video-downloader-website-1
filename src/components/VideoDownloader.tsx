@@ -138,9 +138,16 @@ export default function VideoDownloader() {
       }
 
       const reader = response.body?.getReader();
-      const contentLength = selectedFormat?.size || 0;
-      let receivedLength = 0;
       const chunks: Uint8Array[] = [];
+      let receivedLength = 0;
+
+      // Simulate progress since we're streaming and don't know exact size
+      const progressInterval = setInterval(() => {
+        setProgress((prev) => {
+          if (prev >= 90) return prev; // Cap at 90% until done
+          return prev + Math.random() * 5;
+        });
+      }, 200);
 
       if (reader) {
         while (true) {
@@ -149,16 +156,11 @@ export default function VideoDownloader() {
 
           chunks.push(value);
           receivedLength += value.length;
-
-          if (contentLength > 0) {
-            const percentComplete = (receivedLength / contentLength) * 100;
-            setProgress(Math.min(percentComplete, 100));
-          } else {
-            // Simulated progress if content length unknown
-            setProgress(Math.min(receivedLength / 1000000 * 10, 95));
-          }
         }
       }
+
+      clearInterval(progressInterval);
+      setProgress(95);
 
       const blob = new Blob(chunks);
       const downloadUrl = window.URL.createObjectURL(blob);
@@ -175,7 +177,7 @@ export default function VideoDownloader() {
         title: videoInfo.title,
         thumbnail: videoInfo.thumbnail,
         quality: selectedFormat?.quality || selectedQuality,
-        size: formatBytes(selectedFormat?.size || 0),
+        size: formatBytes(receivedLength),
         timestamp: Date.now(),
       };
 
