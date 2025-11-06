@@ -48,7 +48,7 @@ function extractVideoId(url: string): string | null {
 
 export async function POST(request: NextRequest) {
   try {
-    const { url, itag, quality } = await request.json();
+    const { url, itag, quality, downloadType = 'video' } = await request.json();
 
     const videoId = extractVideoId(url);
     if (!videoId) {
@@ -58,7 +58,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.log(`Downloading video ${videoId} with quality ${quality || itag}...`);
+    console.log(`Downloading ${downloadType} ${videoId} with quality ${quality || itag}...`);
 
     // Ensure binary is ready
     await ensureBinary();
@@ -66,36 +66,62 @@ export async function POST(request: NextRequest) {
     // Initialize yt-dlp with binary path
     const ytDlpWrap = new YTDlpWrap(binaryPath);
     
-    // Get video info to get title and verify format
+    // Get video info to get title
     const info: any = await ytDlpWrap.getVideoInfo([url, '--no-warnings']);
     const title = info.title || 'video';
-    const filename = `${title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.mp4`;
-
-    // Build format selector based on quality or itag
-    let formatSelector: string;
     
-    if (quality) {
-      // Use quality-based selector (more reliable)
-      const height = parseInt(quality.replace('p', ''));
-      // Select best format with requested height that has both video and audio
-      formatSelector = `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]`;
+    let formatSelector: string;
+    let filename: string;
+    let contentType: string;
+    let outputFormat: string;
+
+    if (downloadType === 'audio' || downloadType === 'mp3') {
+      // Audio/MP3 download
+      filename = `${title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.mp3`;
+      contentType = 'audio/mpeg';
+      outputFormat = 'mp3';
+      
+      // Select best audio format
+      if (itag) {
+        formatSelector = `${itag}`;
+      } else {
+        formatSelector = 'bestaudio';
+      }
     } else {
-      // Try to use specific format ID, with fallback
-      formatSelector = `${itag}/best`;
+      // Video download
+      filename = `${title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.mp4`;
+      contentType = 'video/mp4';
+      outputFormat = 'mp4';
+      
+      // Build format selector based on quality or itag
+      if (quality) {
+        const height = parseInt(quality.replace('p', ''));
+        formatSelector = `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]`;
+      } else {
+        formatSelector = `${itag}/best`;
+      }
     }
 
     console.log('Starting download with format selector:', formatSelector);
 
     // Create a readable stream from yt-dlp
-    const ytDlpStream = ytDlpWrap.execStream([
+    const ytDlpArgs = [
       url,
       '-f', formatSelector,
       '-o', '-', // Output to stdout
       '--no-warnings',
       '--no-playlist',
       '--quiet',
-      '--merge-output-format', 'mp4', // Ensure mp4 output
-    ]);
+    ];
+
+    // Add audio conversion for MP3
+    if (downloadType === 'audio' || downloadType === 'mp3') {
+      ytDlpArgs.push('--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0');
+    } else {
+      ytDlpArgs.push('--merge-output-format', outputFormat);
+    }
+
+    const ytDlpStream = ytDlpWrap.execStream(ytDlpArgs);
 
     // Convert Node.js stream to Web Stream
     const webStream = new ReadableStream({
@@ -122,14 +148,14 @@ export async function POST(request: NextRequest) {
     // Set headers for download
     const headers = new Headers();
     headers.set('Content-Disposition', `attachment; filename="${filename}"`);
-    headers.set('Content-Type', 'video/mp4');
+    headers.set('Content-Type', contentType);
     headers.set('Cache-Control', 'no-cache');
 
     return new NextResponse(webStream, { headers });
   } catch (error: any) {
-    console.error('Error downloading video:', error);
+    console.error('Error downloading:', error);
     return NextResponse.json(
-      { error: `Failed to download video: ${error.message}` },
+      { error: `Failed to download: ${error.message}` },
       { status: 500 }
     );
   }

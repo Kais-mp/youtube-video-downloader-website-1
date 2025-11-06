@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Download, Loader2, Video, FileDown } from "lucide-react";
+import { Download, Loader2, Video, FileDown, Music } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
@@ -17,9 +17,16 @@ interface VideoInfo {
   qualities: Array<{
     quality: string;
     size: number;
-    itag: number;
+    itag: string;
     container: string;
+    hasAudio: boolean;
   }>;
+  audioFormat?: {
+    itag: string;
+    abr: number;
+    size: number;
+    container: string;
+  } | null;
 }
 
 interface RecentDownload {
@@ -28,6 +35,7 @@ interface RecentDownload {
   quality: string;
   size: string;
   timestamp: number;
+  type: 'video' | 'audio';
 }
 
 export default function VideoDownloader() {
@@ -36,6 +44,7 @@ export default function VideoDownloader() {
   const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null);
   const [selectedQuality, setSelectedQuality] = useState<string>("");
   const [downloading, setDownloading] = useState(false);
+  const [downloadingAudio, setDownloadingAudio] = useState(false);
   const [progress, setProgress] = useState(0);
   const [recentDownloads, setRecentDownloads] = useState<RecentDownload[]>([]);
 
@@ -90,10 +99,14 @@ export default function VideoDownloader() {
 
       setVideoInfo(data);
       
-      // Set 480p as default, or fallback to first quality
+      // Set default quality (prefer 720p, then 480p, then first available)
       if (data.qualities.length > 0) {
+        const quality720p = data.qualities.find((q: any) => q.quality === "720p");
         const quality480p = data.qualities.find((q: any) => q.quality === "480p");
-        if (quality480p) {
+        
+        if (quality720p) {
+          setSelectedQuality(quality720p.quality);
+        } else if (quality480p) {
           setSelectedQuality(quality480p.quality);
         } else {
           setSelectedQuality(data.qualities[0].quality);
@@ -108,18 +121,32 @@ export default function VideoDownloader() {
     }
   };
 
-  const downloadVideo = async () => {
-    if (!videoInfo || !selectedQuality) return;
+  const downloadMedia = async (type: 'video' | 'audio') => {
+    if (!videoInfo) return;
+    
+    if (type === 'video' && !selectedQuality) {
+      toast.error("Please select a quality");
+      return;
+    }
 
-    setDownloading(true);
+    const isAudio = type === 'audio';
+    if (isAudio) {
+      setDownloadingAudio(true);
+    } else {
+      setDownloading(true);
+    }
     setProgress(0);
 
-    const selectedFormat = videoInfo.qualities.find(
-      (q) => q.quality === selectedQuality
-    );
+    const selectedFormat = isAudio 
+      ? videoInfo.audioFormat
+      : videoInfo.qualities.find((q) => q.quality === selectedQuality);
+
+    const filename = isAudio
+      ? `${videoInfo.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}.mp3`
+      : `${videoInfo.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}.mp4`;
 
     try {
-      toast.info("Starting download...");
+      toast.info(`Starting ${isAudio ? 'audio' : 'video'} download...`);
       
       const response = await fetch("/api/download", {
         method: "POST",
@@ -127,7 +154,8 @@ export default function VideoDownloader() {
         body: JSON.stringify({ 
           url, 
           itag: selectedFormat?.itag,
-          quality: selectedQuality 
+          quality: isAudio ? undefined : selectedQuality,
+          downloadType: isAudio ? 'audio' : 'video'
         }),
       });
 
@@ -162,23 +190,57 @@ export default function VideoDownloader() {
       clearInterval(progressInterval);
       setProgress(95);
 
-      const blob = new Blob(chunks);
-      const downloadUrl = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = downloadUrl;
-      a.download = `${videoInfo.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}.mp4`;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(downloadUrl);
-      document.body.removeChild(a);
+      const blob = new Blob(chunks, { 
+        type: isAudio ? 'audio/mpeg' : 'video/mp4' 
+      });
+
+      // Try to use File System Access API to let user choose location
+      if ('showSaveFilePicker' in window) {
+        try {
+          const handle = await (window as any).showSaveFilePicker({
+            suggestedName: filename,
+            types: [{
+              description: isAudio ? 'MP3 Audio' : 'MP4 Video',
+              accept: isAudio 
+                ? { 'audio/mpeg': ['.mp3'] }
+                : { 'video/mp4': ['.mp4'] }
+            }]
+          });
+          
+          const writable = await handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          
+          toast.success(`${isAudio ? 'Audio' : 'Video'} saved successfully!`);
+        } catch (err: any) {
+          if (err.name === 'AbortError') {
+            toast.info('Download cancelled');
+            return;
+          }
+          throw err; // Fall back to standard download
+        }
+      } else {
+        // Fallback: Standard download (uses browser's default download location)
+        const downloadUrl = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = downloadUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(downloadUrl);
+        document.body.removeChild(a);
+        
+        toast.success(`${isAudio ? 'Audio' : 'Video'} downloaded successfully!`);
+      }
 
       // Add to recent downloads
       const newDownload: RecentDownload = {
         title: videoInfo.title,
         thumbnail: videoInfo.thumbnail,
-        quality: selectedFormat?.quality || selectedQuality,
+        quality: isAudio ? `${videoInfo.audioFormat?.abr || 128}kbps MP3` : (selectedFormat?.quality || selectedQuality),
         size: formatBytes(receivedLength),
         timestamp: Date.now(),
+        type: isAudio ? 'audio' : 'video'
       };
 
       const updated = [newDownload, ...recentDownloads.slice(0, 4)];
@@ -186,11 +248,14 @@ export default function VideoDownloader() {
       localStorage.setItem("recentDownloads", JSON.stringify(updated));
 
       setProgress(100);
-      toast.success("Video downloaded successfully!");
     } catch (error) {
       toast.error("Download error. Please try again.");
     } finally {
-      setDownloading(false);
+      if (isAudio) {
+        setDownloadingAudio(false);
+      } else {
+        setDownloading(false);
+      }
       setTimeout(() => setProgress(0), 2000);
     }
   };
@@ -249,22 +314,24 @@ export default function VideoDownloader() {
 
           <div className="p-6 space-y-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium">Select Quality</label>
+              <label className="text-sm font-medium">Select Video Quality</label>
               <Select value={selectedQuality} onValueChange={setSelectedQuality}>
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="Choose quality" />
                 </SelectTrigger>
                 <SelectContent>
                   {videoInfo.qualities.map((quality) => (
-                    <SelectItem key={quality.quality} value={quality.quality}>
-                      {quality.quality} ({quality.container})
+                    <SelectItem key={quality.itag} value={quality.quality}>
+                      {quality.quality} - {quality.container} 
+                      {quality.size > 0 && ` (${formatBytes(quality.size)})`}
+                      {quality.hasAudio && " 🔊"}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </div>
 
-            {downloading && progress > 0 && (
+            {(downloading || downloadingAudio) && progress > 0 && (
               <div className="space-y-2">
                 <div className="flex justify-between text-sm">
                   <span>Downloading...</span>
@@ -274,23 +341,46 @@ export default function VideoDownloader() {
               </div>
             )}
 
-            <Button
-              onClick={downloadVideo}
-              disabled={!selectedQuality || downloading}
-              className="w-full h-12 text-base"
-            >
-              {downloading ? (
-                <>
-                  <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                  Downloading...
-                </>
-              ) : (
-                <>
-                  <Download className="w-5 h-5 mr-2" />
-                  Download Video
-                </>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Button
+                onClick={() => downloadMedia('video')}
+                disabled={!selectedQuality || downloading || downloadingAudio}
+                className="h-12 text-base"
+              >
+                {downloading ? (
+                  <>
+                    <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                    Downloading...
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-5 h-5 mr-2" />
+                    Download Video
+                  </>
+                )}
+              </Button>
+
+              {videoInfo.audioFormat && (
+                <Button
+                  onClick={() => downloadMedia('audio')}
+                  disabled={downloading || downloadingAudio}
+                  variant="secondary"
+                  className="h-12 text-base"
+                >
+                  {downloadingAudio ? (
+                    <>
+                      <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                      Downloading...
+                    </>
+                  ) : (
+                    <>
+                      <Music className="w-5 h-5 mr-2" />
+                      Download MP3
+                    </>
+                  )}
+                </Button>
               )}
-            </Button>
+            </div>
           </div>
         </Card>
       )}
@@ -309,11 +399,18 @@ export default function VideoDownloader() {
                 className="overflow-hidden hover:shadow-lg transition-all duration-300 hover:-translate-y-1"
               >
                 <div className="flex gap-3 p-3">
-                  <img
-                    src={download.thumbnail}
-                    alt={download.title}
-                    className="w-24 h-16 object-cover rounded"
-                  />
+                  <div className="relative">
+                    <img
+                      src={download.thumbnail}
+                      alt={download.title}
+                      className="w-24 h-16 object-cover rounded"
+                    />
+                    {download.type === 'audio' && (
+                      <div className="absolute inset-0 bg-black/50 flex items-center justify-center rounded">
+                        <Music className="w-6 h-6 text-white" />
+                      </div>
+                    )}
+                  </div>
                   <div className="flex-1 min-w-0">
                     <h4 className="font-medium text-sm line-clamp-2 mb-1">
                       {download.title}

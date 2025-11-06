@@ -64,9 +64,9 @@ export async function POST(request: NextRequest) {
     // Initialize yt-dlp with binary path
     const ytDlpWrap = new YTDlpWrap(binaryPath);
 
-    console.log('Fetching video info...');
+    console.log('Fetching video info with all formats...');
 
-    // Get video info using yt-dlp with simpler format selection
+    // Get video info using yt-dlp with all format details
     const info: any = await ytDlpWrap.getVideoInfo([
       url,
       '--no-warnings',
@@ -76,25 +76,44 @@ export async function POST(request: NextRequest) {
     // Extract available formats
     const formats = info.formats || [];
     
-    // Create quality map - prefer formats with both video and audio
+    // Create quality map for video formats (with video codec)
     const qualityMap = new Map<string, any>();
+    
+    // Track best audio format for MP3 download
+    let bestAudioFormat: any = null;
     
     formats.forEach((format: any) => {
       const height = format.height;
-      if (!height || !format.vcodec || format.vcodec === 'none') return;
+      const hasVideo = format.vcodec && format.vcodec !== 'none';
+      const hasAudio = format.acodec && format.acodec !== 'none';
+      
+      // Track best audio-only format
+      if (hasAudio && !hasVideo) {
+        if (!bestAudioFormat || (format.abr || 0) > (bestAudioFormat.abr || 0)) {
+          bestAudioFormat = format;
+        }
+      }
+      
+      // Only process video formats
+      if (!height || !hasVideo) return;
       
       const quality = `${height}p`;
-      const hasAudio = format.acodec && format.acodec !== 'none';
       const existing = qualityMap.get(quality);
       
-      // Prefer formats with both video and audio
-      if (!existing || (hasAudio && !existing.hasAudio)) {
+      // Calculate approximate size if not available
+      const filesize = format.filesize || format.filesize_approx || 0;
+      
+      // Prefer formats with both video and audio, or better quality/size
+      if (!existing || (hasAudio && !existing.hasAudio) || filesize > existing.size) {
         qualityMap.set(quality, {
           quality,
-          size: format.filesize || format.filesize_approx || 0,
+          size: filesize,
           itag: format.format_id,
           container: format.ext || 'mp4',
-          hasAudio
+          hasAudio,
+          fps: format.fps || 30,
+          vcodec: format.vcodec,
+          acodec: format.acodec
         });
       }
     });
@@ -103,7 +122,8 @@ export async function POST(request: NextRequest) {
     const qualities = Array.from(qualityMap.values())
       .sort((a, b) => parseInt(b.quality) - parseInt(a.quality));
 
-    console.log('Available qualities:', qualities.map(q => `${q.quality} (audio: ${q.hasAudio})`));
+    console.log('Available video qualities:', qualities.length);
+    console.log('Best audio format:', bestAudioFormat ? `${bestAudioFormat.abr}kbps` : 'none');
 
     const videoInfo = {
       title: info.title || 'Unknown Title',
@@ -111,6 +131,12 @@ export async function POST(request: NextRequest) {
       author: info.uploader || info.channel || 'Unknown',
       duration: String(info.duration || 0),
       qualities: qualities,
+      audioFormat: bestAudioFormat ? {
+        itag: bestAudioFormat.format_id,
+        abr: bestAudioFormat.abr || 128,
+        size: bestAudioFormat.filesize || bestAudioFormat.filesize_approx || 0,
+        container: bestAudioFormat.ext || 'm4a'
+      } : null
     };
 
     return NextResponse.json(videoInfo);
