@@ -166,6 +166,11 @@ export default function VideoDownloader() {
       }
 
       const reader = response.body?.getReader();
+      if (!reader) {
+        toast.error("Failed to read download stream");
+        return;
+      }
+
       const chunks: Uint8Array[] = [];
       let receivedLength = 0;
 
@@ -177,14 +182,12 @@ export default function VideoDownloader() {
         });
       }, 200);
 
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-          chunks.push(value);
-          receivedLength += value.length;
-        }
+        chunks.push(value);
+        receivedLength += value.length;
       }
 
       clearInterval(progressInterval);
@@ -194,8 +197,11 @@ export default function VideoDownloader() {
         type: isAudio ? 'audio/mpeg' : 'video/mp4' 
       });
 
-      // Try to use File System Access API to let user choose location
-      if ('showSaveFilePicker' in window) {
+      // Check if File System Access API is available and not blocked
+      const hasFileSystemAccess = 'showSaveFilePicker' in window;
+      let savedSuccessfully = false;
+
+      if (hasFileSystemAccess) {
         try {
           const handle = await (window as any).showSaveFilePicker({
             suggestedName: filename,
@@ -211,26 +217,37 @@ export default function VideoDownloader() {
           await writable.write(blob);
           await writable.close();
           
-          toast.success(`${isAudio ? 'Audio' : 'Video'} saved successfully!`);
+          savedSuccessfully = true;
+          toast.success(`${isAudio ? 'Audio' : 'Video'} saved to your chosen location!`);
         } catch (err: any) {
+          // User cancelled or permission denied - try fallback
           if (err.name === 'AbortError') {
             toast.info('Download cancelled');
             return;
           }
-          throw err; // Fall back to standard download
+          console.log('File System Access API failed, using fallback download:', err.message);
+          // Continue to fallback below
         }
-      } else {
-        // Fallback: Standard download (uses browser's default download location)
+      }
+
+      // Fallback: Standard browser download
+      if (!savedSuccessfully) {
         const downloadUrl = window.URL.createObjectURL(blob);
         const a = document.createElement("a");
+        a.style.display = "none";
         a.href = downloadUrl;
         a.download = filename;
+        
         document.body.appendChild(a);
         a.click();
-        window.URL.revokeObjectURL(downloadUrl);
-        document.body.removeChild(a);
         
-        toast.success(`${isAudio ? 'Audio' : 'Video'} downloaded successfully!`);
+        // Clean up after a short delay
+        setTimeout(() => {
+          window.URL.revokeObjectURL(downloadUrl);
+          document.body.removeChild(a);
+        }, 100);
+        
+        toast.success(`${isAudio ? 'Audio' : 'Video'} downloaded! Check your Downloads folder.`);
       }
 
       // Add to recent downloads
@@ -248,8 +265,9 @@ export default function VideoDownloader() {
       localStorage.setItem("recentDownloads", JSON.stringify(updated));
 
       setProgress(100);
-    } catch (error) {
-      toast.error("Download error. Please try again.");
+    } catch (error: any) {
+      console.error("Download error:", error);
+      toast.error(`Download failed: ${error.message || 'Unknown error'}. Please try again.`);
     } finally {
       if (isAudio) {
         setDownloadingAudio(false);
