@@ -129,6 +129,21 @@ export default function VideoDownloader() {
       return;
     }
 
+    // Check if we're in an iframe
+    const isInIframe = window.self !== window.top;
+    
+    if (isInIframe) {
+      toast.error(
+        "Downloads are blocked in iframe mode. Opening in new tab...",
+        { duration: 4000 }
+      );
+      
+      // Open the app in a new tab
+      const currentUrl = window.location.href;
+      window.open(currentUrl, '_blank');
+      return;
+    }
+
     const isAudio = type === 'audio';
     if (isAudio) {
       setDownloadingAudio(true);
@@ -218,7 +233,7 @@ export default function VideoDownloader() {
           await writable.close();
           
           savedSuccessfully = true;
-          toast.success(`${isAudio ? 'Audio' : 'Video'} saved to your chosen location!`);
+          toast.success(`${isAudio ? 'Audio' : 'Video'} saved successfully!`);
         } catch (err: any) {
           // User cancelled or permission denied - try fallback
           if (err.name === 'AbortError') {
@@ -234,20 +249,22 @@ export default function VideoDownloader() {
       if (!savedSuccessfully) {
         const downloadUrl = window.URL.createObjectURL(blob);
         const a = document.createElement("a");
-        a.style.display = "none";
         a.href = downloadUrl;
         a.download = filename;
         
         document.body.appendChild(a);
         a.click();
         
-        // Clean up after a short delay
+        // Clean up
         setTimeout(() => {
           window.URL.revokeObjectURL(downloadUrl);
           document.body.removeChild(a);
         }, 100);
         
-        toast.success(`${isAudio ? 'Audio' : 'Video'} downloaded! Check your Downloads folder.`);
+        toast.success(
+          `${isAudio ? 'Audio' : 'Video'} file ready! Check your Downloads folder.`,
+          { duration: 4000 }
+        );
       }
 
       // Add to recent downloads
