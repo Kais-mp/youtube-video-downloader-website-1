@@ -186,105 +186,45 @@ export default function VideoDownloader() {
         return;
       }
 
-      const reader = response.body?.getReader();
-      if (!reader) {
-        toast.error("Failed to read download stream");
-        return;
-      }
+      // Use simpler approach - just get the blob directly
+      setProgress(50);
+      
+      const blob = await response.blob();
+      
+      setProgress(90);
 
-      const chunks: Uint8Array[] = [];
-      let receivedLength = 0;
+      // Create download link
+      const blobUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.style.display = "none";
+      a.href = blobUrl;
+      a.download = filename;
+      
+      document.body.appendChild(a);
+      a.click();
+      
+      setProgress(100);
 
-      // Progress tracking
-      const progressInterval = setInterval(() => {
-        setProgress((prev) => {
-          if (prev >= 90) return prev;
-          return prev + Math.random() * 5;
-        });
-      }, 200);
+      // Cleanup
+      setTimeout(() => {
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(blobUrl);
+      }, 100);
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        chunks.push(value);
-        receivedLength += value.length;
-      }
-
-      clearInterval(progressInterval);
-      setProgress(95);
-
-      const blob = new Blob(chunks, { 
-        type: isAudio ? 'audio/mpeg' : 'video/mp4' 
-      });
-
-      // Try to trigger download
-      let downloadSucceeded = false;
-
-      // Method 1: File System Access API (if available)
-      if ('showSaveFilePicker' in window) {
-        try {
-          const handle = await (window as any).showSaveFilePicker({
-            suggestedName: filename,
-            types: [{
-              description: isAudio ? 'MP3 Audio' : 'MP4 Video',
-              accept: isAudio 
-                ? { 'audio/mpeg': ['.mp3'] }
-                : { 'video/mp4': ['.mp4'] }
-            }]
-          });
-          
-          const writable = await handle.createWritable();
-          await writable.write(blob);
-          await writable.close();
-          
-          downloadSucceeded = true;
-          toast.success(`${isAudio ? 'Audio' : 'Video'} saved successfully!`);
-        } catch (err: any) {
-          if (err.name === 'AbortError') {
-            toast.info('Save cancelled');
-            return;
-          }
-          // Fall through to next method
+      toast.success(
+        `${isAudio ? 'Audio' : 'Video'} downloaded successfully!`,
+        { 
+          duration: 3000,
+          description: "Check your Downloads folder"
         }
-      }
-
-      // Method 2: Standard download link
-      if (!downloadSucceeded) {
-        const blobUrl = window.URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.style.display = "none";
-        a.href = blobUrl;
-        a.download = filename;
-        
-        document.body.appendChild(a);
-        a.click();
-        
-        // Test if download actually worked
-        setTimeout(() => {
-          // Keep the URL available as fallback
-          setDownloadUrl(blobUrl);
-          
-          toast.success(
-            `${isAudio ? 'Audio' : 'Video'} download started!`,
-            { 
-              duration: 5000,
-              description: "Check your browser's Downloads folder. If it didn't start, use the manual download link below."
-            }
-          );
-          
-          document.body.removeChild(a);
-        }, 100);
-
-        downloadSucceeded = true;
-      }
+      );
 
       // Add to recent downloads
       const newDownload: RecentDownload = {
         title: videoInfo.title,
         thumbnail: videoInfo.thumbnail,
         quality: isAudio ? `${videoInfo.audioFormat?.abr || 128}kbps MP3` : (selectedFormat?.quality || selectedQuality),
-        size: formatBytes(receivedLength),
+        size: formatBytes(blob.size),
         timestamp: Date.now(),
         type: isAudio ? 'audio' : 'video'
       };
@@ -293,7 +233,6 @@ export default function VideoDownloader() {
       setRecentDownloads(updated);
       localStorage.setItem("recentDownloads", JSON.stringify(updated));
 
-      setProgress(100);
     } catch (error: any) {
       console.error("Download error:", error);
       toast.error(`Download failed: ${error.message || 'Unknown error'}. Please try again.`);
@@ -326,6 +265,23 @@ export default function VideoDownloader() {
               <ExternalLink className="w-4 h-4 mr-2" />
               Open in New Tab
             </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {/* Processing/Downloading Message */}
+      {(downloading || downloadingAudio) && (
+        <Alert className="border-2 border-primary/50 bg-primary/10 animate-pulse">
+          <Loader2 className="h-5 w-5 text-primary animate-spin" />
+          <AlertDescription>
+            <div className="space-y-1">
+              <p className="font-semibold text-base">
+                Please wait, your video is being processed and downloaded
+              </p>
+              <p className="text-sm text-muted-foreground">
+                This may take a few moments depending on the video size and quality...
+              </p>
+            </div>
           </AlertDescription>
         </Alert>
       )}
