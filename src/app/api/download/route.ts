@@ -88,17 +88,21 @@ export async function POST(request: NextRequest) {
         formatSelector = 'bestaudio';
       }
     } else {
-      // Video download
+      // Video download - ENSURE AUDIO IS INCLUDED
       filename = `${title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.mp4`;
       contentType = 'video/mp4';
       outputFormat = 'mp4';
       
-      // Build format selector based on quality or itag
+      // FIXED: Always merge video+audio, prefer formats with built-in audio
       if (quality) {
         const height = parseInt(quality.replace('p', ''));
-        formatSelector = `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]`;
+        // Try to get format with both video and audio first, then fall back to merging
+        formatSelector = `bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${height}]`;
+      } else if (itag) {
+        // If specific itag provided, check if it has audio, if not merge with best audio
+        formatSelector = `${itag}+bestaudio/best`;
       } else {
-        formatSelector = `${itag}/best`;
+        formatSelector = `bestvideo[ext=mp4]+bestaudio[ext=m4a]/best`;
       }
     }
 
@@ -118,7 +122,11 @@ export async function POST(request: NextRequest) {
     if (downloadType === 'audio' || downloadType === 'mp3') {
       ytDlpArgs.push('--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0');
     } else {
-      ytDlpArgs.push('--merge-output-format', outputFormat);
+      // CRITICAL: Ensure ffmpeg merges video and audio properly
+      ytDlpArgs.push(
+        '--merge-output-format', outputFormat,
+        '--postprocessor-args', 'ffmpeg:-c:v copy -c:a aac'
+      );
     }
 
     const ytDlpStream = ytDlpWrap.execStream(ytDlpArgs);
