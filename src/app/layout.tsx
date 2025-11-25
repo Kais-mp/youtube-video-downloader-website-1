@@ -8,6 +8,10 @@ import { Toaster } from "@/components/ui/sonner";
 export const metadata: Metadata = {
   title: "YouTube Video Downloader - Download Videos in High Quality",
   description: "Download YouTube videos in multiple quality options. Fast, simple, and completely free.",
+  metadataBase: new URL('https://yourdomain.com'),
+  verification: {
+    google: 'your-google-site-verification-code',
+  },
 };
 
 export default function RootLayout({
@@ -18,7 +22,17 @@ export default function RootLayout({
   return (
     <html lang="en">
       <head>
-        <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@100;200;300;400;500;600;700;800;900&display=swap" />        <style>{`
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@100;200;300;400;500;600;700;800;900&display=swap" />
+        
+        {/* Google AdSense */}
+        <Script
+          async
+          src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-XXXXXXXXXX"
+          crossOrigin="anonymous"
+          strategy="afterInteractive"
+        />
+        
+        <style>{`
         :root {
           --font-montserrat: 'Montserrat', sans-serif;
         }

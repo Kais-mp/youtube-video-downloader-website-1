@@ -60,6 +60,14 @@ function extractVideoId(url: string): string | null {
   return null;
 }
 
+// Sanitize filename for safe downloads
+function sanitizeFilename(filename: string): string {
+  return filename
+    .replace(/[^a-z0-9]/gi, '_')
+    .toLowerCase()
+    .substring(0, 200); // Limit filename length
+}
+
 export async function POST(request: NextRequest) {
   let tempFilePath: string | null = null;
   let videoFilePath: string | null = null;
@@ -87,6 +95,7 @@ export async function POST(request: NextRequest) {
     // Get video info to get title
     const info: any = await ytDlpWrap.getVideoInfo([url, '--no-warnings']);
     const title = info.title || 'video';
+    const sanitizedTitle = sanitizeFilename(title);
     
     let formatSelector: string;
     let filename: string;
@@ -95,7 +104,7 @@ export async function POST(request: NextRequest) {
 
     if (downloadType === 'audio' || downloadType === 'mp3') {
       // Audio/MP3 download - can stream directly
-      filename = `${title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.mp3`;
+      filename = `${sanitizedTitle}.mp3`;
       contentType = 'audio/mpeg';
       outputFormat = 'mp3';
       
@@ -142,10 +151,14 @@ export async function POST(request: NextRequest) {
         }
       });
 
+      // Optimized headers for immediate Chrome download
       const headers = new Headers();
-      headers.set('Content-Disposition', `attachment; filename="${filename}"`);
       headers.set('Content-Type', contentType);
-      headers.set('Cache-Control', 'no-cache');
+      headers.set('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
+      headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+      headers.set('Pragma', 'no-cache');
+      headers.set('Expires', '0');
+      headers.set('X-Content-Type-Options', 'nosniff');
 
       return new NextResponse(webStream, { headers });
 
@@ -158,7 +171,7 @@ export async function POST(request: NextRequest) {
         // If no ffmpeg, download best single file format (video+audio already combined)
         console.log('FFmpeg not available, using single file format');
         
-        filename = `${title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.mp4`;
+        filename = `${sanitizedTitle}.mp4`;
         contentType = 'video/mp4';
 
         formatSelector = 'best[ext=mp4]/best';
@@ -197,16 +210,20 @@ export async function POST(request: NextRequest) {
           }
         });
 
+        // Optimized headers for immediate Chrome download
         const headers = new Headers();
-        headers.set('Content-Disposition', `attachment; filename="${filename}"`);
         headers.set('Content-Type', contentType);
-        headers.set('Cache-Control', 'no-cache');
+        headers.set('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
+        headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        headers.set('Pragma', 'no-cache');
+        headers.set('Expires', '0');
+        headers.set('X-Content-Type-Options', 'nosniff');
 
         return new NextResponse(webStream, { headers });
       }
       
       // FFmpeg is available - download and manually merge
-      filename = `${title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.mp4`;
+      filename = `${sanitizedTitle}.mp4`;
       contentType = 'video/mp4';
       
       const tempDir = os.tmpdir();
@@ -321,12 +338,16 @@ export async function POST(request: NextRequest) {
       videoFilePath = null;
       audioFilePath = null;
 
-      // Return the merged video file
+      // Return the merged video file with optimized headers for immediate Chrome download
       const headers = new Headers();
-      headers.set('Content-Disposition', `attachment; filename="${filename}"`);
       headers.set('Content-Type', contentType);
+      headers.set('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
       headers.set('Content-Length', fileBuffer.length.toString());
-      headers.set('Cache-Control', 'no-cache');
+      headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+      headers.set('Pragma', 'no-cache');
+      headers.set('Expires', '0');
+      headers.set('X-Content-Type-Options', 'nosniff');
+      headers.set('Accept-Ranges', 'bytes');
 
       return new NextResponse(fileBuffer, { headers });
     }
