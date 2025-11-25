@@ -141,9 +141,13 @@ export async function POST(request: NextRequest) {
       contentType = 'video/mp4';
       outputFormat = 'mp4';
       
-      // Create temp file path
+      // Create temp file path with sanitized filename
       const tempDir = os.tmpdir();
-      tempFilePath = path.join(tempDir, `${Date.now()}_${videoId}.mp4`);
+      const sanitizedTitle = title.replace(/[^a-z0-9]/gi, '_').toLowerCase().substring(0, 50);
+      const timestamp = Date.now();
+      tempFilePath = path.join(tempDir, `yt_${timestamp}_${videoId}.mp4`);
+      
+      console.log('Temp file will be saved to:', tempFilePath);
       
       // FIXED: Always merge video+audio, prefer formats with built-in audio
       if (quality) {
@@ -158,7 +162,6 @@ export async function POST(request: NextRequest) {
       }
 
       console.log('Starting video download with format selector:', formatSelector);
-      console.log('Temp file path:', tempFilePath);
 
       // Download to temp file (required for ffmpeg merging)
       const ytDlpArgs = [
@@ -167,15 +170,52 @@ export async function POST(request: NextRequest) {
         '-o', tempFilePath,
         '--no-warnings',
         '--no-playlist',
-        '--merge-output-format', outputFormat,
+        '--merge-output-format', 'mp4',
         '--postprocessor-args', 'ffmpeg:-c:v copy -c:a aac',
-        '--no-mtime'
+        '--no-mtime',
+        '--no-progress'
       ];
 
-      // Execute download and wait for completion
-      await ytDlpWrap.execPromise(ytDlpArgs);
+      try {
+        // Execute download and wait for completion
+        console.log('Executing yt-dlp...');
+        await ytDlpWrap.execPromise(ytDlpArgs);
+        console.log('yt-dlp execution completed');
+      } catch (downloadError: any) {
+        console.error('yt-dlp download error:', downloadError);
+        throw new Error(`Download failed: ${downloadError.message || 'Unknown error'}`);
+      }
       
-      console.log('Video download and merge complete, reading file...');
+      // Verify file exists
+      if (!fs.existsSync(tempFilePath)) {
+        // Check if file was created with different extension
+        const possiblePaths = [
+          tempFilePath,
+          tempFilePath.replace('.mp4', '.mkv'),
+          tempFilePath.replace('.mp4', '.webm'),
+          `${tempFilePath}.part`
+        ];
+        
+        let foundPath: string | null = null;
+        for (const possiblePath of possiblePaths) {
+          if (fs.existsSync(possiblePath)) {
+            foundPath = possiblePath;
+            console.log('Found file at alternate path:', foundPath);
+            break;
+          }
+        }
+        
+        if (!foundPath) {
+          // List files in temp directory for debugging
+          const tempFiles = fs.readdirSync(tempDir).filter(f => f.includes(videoId) || f.includes(timestamp.toString()));
+          console.error('Expected file not found. Files in temp dir matching pattern:', tempFiles);
+          throw new Error(`Downloaded file not found at expected location: ${tempFilePath}`);
+        }
+        
+        tempFilePath = foundPath;
+      }
+      
+      console.log('Video download and merge complete, reading file from:', tempFilePath);
 
       // Read the merged file
       const fileBuffer = fs.readFileSync(tempFilePath);
