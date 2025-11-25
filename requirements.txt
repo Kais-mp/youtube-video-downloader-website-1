@@ -1,0 +1,5 @@
+# Python dependencies for YouTube Video Downloader
+# Install with: pip install -r requirements.txt
+
+# YouTube video downloader (core dependency)
+yt-dlp>=2024.0.0
