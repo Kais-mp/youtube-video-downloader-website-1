@@ -1,13 +1,14 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Download, Loader2, Video, FileDown, Music } from "lucide-react";
+import { Download, Loader2, Video, FileDown, Music, ExternalLink, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 
 interface VideoInfo {
   title: string;
@@ -47,6 +48,13 @@ export default function VideoDownloader() {
   const [downloadingAudio, setDownloadingAudio] = useState(false);
   const [progress, setProgress] = useState(0);
   const [recentDownloads, setRecentDownloads] = useState<RecentDownload[]>([]);
+  const [isInIframe, setIsInIframe] = useState(false);
+  const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+
+  // Check iframe on mount
+  useEffect(() => {
+    setIsInIframe(window.self !== window.top);
+  }, []);
 
   // Load recent downloads on mount
   useEffect(() => {
@@ -129,18 +137,15 @@ export default function VideoDownloader() {
       return;
     }
 
-    // Check if we're in an iframe
-    const isInIframe = window.self !== window.top;
-    
+    // Handle iframe restriction
     if (isInIframe) {
       toast.error(
-        "Downloads are blocked in iframe mode. Opening in new tab...",
-        { duration: 4000 }
+        "Downloads are blocked in preview mode",
+        { 
+          duration: 5000,
+          description: "Click 'Open in New Tab' button below to download"
+        }
       );
-      
-      // Open the app in a new tab
-      const currentUrl = window.location.href;
-      window.open(currentUrl, '_blank');
       return;
     }
 
@@ -151,6 +156,7 @@ export default function VideoDownloader() {
       setDownloading(true);
     }
     setProgress(0);
+    setDownloadUrl(null);
 
     const selectedFormat = isAudio 
       ? videoInfo.audioFormat
@@ -189,10 +195,10 @@ export default function VideoDownloader() {
       const chunks: Uint8Array[] = [];
       let receivedLength = 0;
 
-      // Simulate progress since we're streaming and don't know exact size
+      // Progress tracking
       const progressInterval = setInterval(() => {
         setProgress((prev) => {
-          if (prev >= 90) return prev; // Cap at 90% until done
+          if (prev >= 90) return prev;
           return prev + Math.random() * 5;
         });
       }, 200);
@@ -212,11 +218,11 @@ export default function VideoDownloader() {
         type: isAudio ? 'audio/mpeg' : 'video/mp4' 
       });
 
-      // Check if File System Access API is available and not blocked
-      const hasFileSystemAccess = 'showSaveFilePicker' in window;
-      let savedSuccessfully = false;
+      // Try to trigger download
+      let downloadSucceeded = false;
 
-      if (hasFileSystemAccess) {
+      // Method 1: File System Access API (if available)
+      if ('showSaveFilePicker' in window) {
         try {
           const handle = await (window as any).showSaveFilePicker({
             suggestedName: filename,
@@ -232,39 +238,45 @@ export default function VideoDownloader() {
           await writable.write(blob);
           await writable.close();
           
-          savedSuccessfully = true;
+          downloadSucceeded = true;
           toast.success(`${isAudio ? 'Audio' : 'Video'} saved successfully!`);
         } catch (err: any) {
-          // User cancelled or permission denied - try fallback
           if (err.name === 'AbortError') {
-            toast.info('Download cancelled');
+            toast.info('Save cancelled');
             return;
           }
-          console.log('File System Access API failed, using fallback download:', err.message);
-          // Continue to fallback below
+          // Fall through to next method
         }
       }
 
-      // Fallback: Standard browser download
-      if (!savedSuccessfully) {
-        const downloadUrl = window.URL.createObjectURL(blob);
+      // Method 2: Standard download link
+      if (!downloadSucceeded) {
+        const blobUrl = window.URL.createObjectURL(blob);
         const a = document.createElement("a");
-        a.href = downloadUrl;
+        a.style.display = "none";
+        a.href = blobUrl;
         a.download = filename;
         
         document.body.appendChild(a);
         a.click();
         
-        // Clean up
+        // Test if download actually worked
         setTimeout(() => {
-          window.URL.revokeObjectURL(downloadUrl);
+          // Keep the URL available as fallback
+          setDownloadUrl(blobUrl);
+          
+          toast.success(
+            `${isAudio ? 'Audio' : 'Video'} download started!`,
+            { 
+              duration: 5000,
+              description: "Check your browser's Downloads folder. If it didn't start, use the manual download link below."
+            }
+          );
+          
           document.body.removeChild(a);
         }, 100);
-        
-        toast.success(
-          `${isAudio ? 'Audio' : 'Video'} file ready! Check your Downloads folder.`,
-          { duration: 4000 }
-        );
+
+        downloadSucceeded = true;
       }
 
       // Add to recent downloads
@@ -297,6 +309,27 @@ export default function VideoDownloader() {
 
   return (
     <div className="space-y-8">
+      {/* Iframe Warning */}
+      {isInIframe && (
+        <Alert className="border-2 border-orange-500/50 bg-orange-500/10">
+          <AlertCircle className="h-5 w-5 text-orange-500" />
+          <AlertDescription className="flex items-center justify-between">
+            <span className="text-sm">
+              You're viewing this in preview mode. Downloads work best in a full browser tab.
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => window.open(window.location.href, '_blank')}
+              className="ml-4 whitespace-nowrap border-orange-500/50 hover:bg-orange-500/20"
+            >
+              <ExternalLink className="w-4 h-4 mr-2" />
+              Open in New Tab
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
       {/* URL Input Section */}
       <Card className="p-6 bg-gradient-to-br from-card via-card to-accent/5 border-2 hover:border-primary/20 transition-all duration-300">
         <div className="flex items-center gap-2 mb-4">
@@ -374,6 +407,29 @@ export default function VideoDownloader() {
                 </div>
                 <Progress value={progress} className="h-2" />
               </div>
+            )}
+
+            {/* Manual Download Link (if automatic download fails) */}
+            {downloadUrl && (
+              <Alert className="border-blue-500/50 bg-blue-500/10">
+                <Download className="h-5 w-5 text-blue-500" />
+                <AlertDescription className="flex items-center justify-between">
+                  <span className="text-sm">
+                    Automatic download not working?
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    asChild
+                    className="ml-4 whitespace-nowrap border-blue-500/50 hover:bg-blue-500/20"
+                  >
+                    <a href={downloadUrl} download>
+                      <Download className="w-4 h-4 mr-2" />
+                      Click to Download
+                    </a>
+                  </Button>
+                </AlertDescription>
+              </Alert>
             )}
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
