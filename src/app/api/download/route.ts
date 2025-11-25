@@ -3,6 +3,10 @@ import YTDlpWrap from 'yt-dlp-wrap';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 // Store binary in tmp directory for serverless compatibility
 const binaryPath = path.join(os.tmpdir(), 'yt-dlp');
@@ -34,6 +38,16 @@ async function ensureBinary() {
   await downloadPromise;
 }
 
+// Check if ffmpeg is available
+async function checkFfmpeg(): Promise<boolean> {
+  try {
+    await execAsync('ffmpeg -version');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function extractVideoId(url: string): string | null {
   const patterns = [
     /(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/,
@@ -48,6 +62,8 @@ function extractVideoId(url: string): string | null {
 
 export async function POST(request: NextRequest) {
   let tempFilePath: string | null = null;
+  let videoFilePath: string | null = null;
+  let audioFilePath: string | null = null;
   
   try {
     const { url, itag, quality, downloadType = 'video' } = await request.json();
@@ -83,7 +99,6 @@ export async function POST(request: NextRequest) {
       contentType = 'audio/mpeg';
       outputFormat = 'mp3';
       
-      // Select best audio format
       if (itag) {
         formatSelector = `${itag}`;
       } else {
@@ -95,7 +110,7 @@ export async function POST(request: NextRequest) {
       const ytDlpArgs = [
         url,
         '-f', formatSelector,
-        '-o', '-', // Output to stdout
+        '-o', '-',
         '--no-warnings',
         '--no-playlist',
         '--quiet',
@@ -106,7 +121,6 @@ export async function POST(request: NextRequest) {
 
       const ytDlpStream = ytDlpWrap.execStream(ytDlpArgs);
 
-      // Convert Node.js stream to Web Stream
       const webStream = new ReadableStream({
         start(controller) {
           ytDlpStream.on('data', (chunk: Buffer) => {
@@ -136,95 +150,176 @@ export async function POST(request: NextRequest) {
       return new NextResponse(webStream, { headers });
 
     } else {
-      // Video download - MUST use temp file for proper video+audio merging
+      // Video download
+      const hasFfmpeg = await checkFfmpeg();
+      console.log('FFmpeg available:', hasFfmpeg);
+      
+      if (!hasFfmpeg) {
+        // If no ffmpeg, download best single file format (video+audio already combined)
+        console.log('FFmpeg not available, using single file format');
+        
+        filename = `${title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.mp4`;
+        contentType = 'video/mp4';
+
+        formatSelector = 'best[ext=mp4]/best';
+
+        console.log('Starting single-file video download with format selector:', formatSelector);
+
+        const ytDlpArgs = [
+          url,
+          '-f', formatSelector,
+          '-o', '-',
+          '--no-warnings',
+          '--no-playlist',
+          '--quiet'
+        ];
+
+        const ytDlpStream = ytDlpWrap.execStream(ytDlpArgs);
+
+        const webStream = new ReadableStream({
+          start(controller) {
+            ytDlpStream.on('data', (chunk: Buffer) => {
+              controller.enqueue(new Uint8Array(chunk));
+            });
+            
+            ytDlpStream.on('end', () => {
+              console.log('Video download complete');
+              controller.close();
+            });
+            
+            ytDlpStream.on('error', (error: Error) => {
+              console.error('Stream error:', error);
+              controller.error(error);
+            });
+          },
+          cancel() {
+            ytDlpStream.destroy();
+          }
+        });
+
+        const headers = new Headers();
+        headers.set('Content-Disposition', `attachment; filename="${filename}"`);
+        headers.set('Content-Type', contentType);
+        headers.set('Cache-Control', 'no-cache');
+
+        return new NextResponse(webStream, { headers });
+      }
+      
+      // FFmpeg is available - download and manually merge
       filename = `${title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.mp4`;
       contentType = 'video/mp4';
-      outputFormat = 'mp4';
       
-      // Create temp file path with sanitized filename
       const tempDir = os.tmpdir();
-      const sanitizedTitle = title.replace(/[^a-z0-9]/gi, '_').toLowerCase().substring(0, 50);
       const timestamp = Date.now();
-      tempFilePath = path.join(tempDir, `yt_${timestamp}_${videoId}.mp4`);
+      const baseFileName = `yt_${timestamp}_${videoId}`;
       
-      console.log('Temp file will be saved to:', tempFilePath);
+      // Download video and audio separately with specific output template
+      const videoTemplate = path.join(tempDir, `${baseFileName}_video.%(ext)s`);
+      const audioTemplate = path.join(tempDir, `${baseFileName}_audio.%(ext)s`);
       
-      // FIXED: Always merge video+audio, prefer formats with built-in audio
+      console.log('Downloading video and audio separately...');
+      
+      // Download video
       if (quality) {
         const height = parseInt(quality.replace('p', ''));
-        // Try to get format with both video and audio first, then fall back to merging
-        formatSelector = `bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${height}]+bestaudio/best[height<=${height}]`;
-      } else if (itag) {
-        // If specific itag provided, check if it has audio, if not merge with best audio
-        formatSelector = `${itag}+bestaudio/best`;
+        formatSelector = `bestvideo[height<=${height}][ext=mp4]/bestvideo[height<=${height}]`;
       } else {
-        formatSelector = `bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best`;
+        formatSelector = 'bestvideo[ext=mp4]/bestvideo';
       }
-
-      console.log('Starting video download with format selector:', formatSelector);
-
-      // Download to temp file (required for ffmpeg merging)
-      const ytDlpArgs = [
+      
+      console.log('Video format selector:', formatSelector);
+      
+      const videoArgs = [
         url,
         '-f', formatSelector,
-        '-o', tempFilePath,
+        '-o', videoTemplate,
         '--no-warnings',
-        '--no-playlist',
-        '--merge-output-format', 'mp4',
-        '--postprocessor-args', 'ffmpeg:-c:v copy -c:a aac',
-        '--no-mtime',
-        '--no-progress'
+        '--no-playlist'
       ];
-
+      
+      await ytDlpWrap.execPromise(videoArgs);
+      console.log('Video downloaded');
+      
+      // Find video file
+      const videoExtensions = ['mp4', 'webm', 'mkv'];
+      for (const ext of videoExtensions) {
+        const testPath = path.join(tempDir, `${baseFileName}_video.${ext}`);
+        if (fs.existsSync(testPath)) {
+          videoFilePath = testPath;
+          console.log('Found video file:', videoFilePath);
+          break;
+        }
+      }
+      
+      if (!videoFilePath) {
+        throw new Error('Video file not found after download');
+      }
+      
+      // Download audio
+      const audioArgs = [
+        url,
+        '-f', 'bestaudio[ext=m4a]/bestaudio',
+        '-o', audioTemplate,
+        '--no-warnings',
+        '--no-playlist'
+      ];
+      
+      await ytDlpWrap.execPromise(audioArgs);
+      console.log('Audio downloaded');
+      
+      // Find audio file
+      const audioExtensions = ['m4a', 'webm', 'opus'];
+      for (const ext of audioExtensions) {
+        const testPath = path.join(tempDir, `${baseFileName}_audio.${ext}`);
+        if (fs.existsSync(testPath)) {
+          audioFilePath = testPath;
+          console.log('Found audio file:', audioFilePath);
+          break;
+        }
+      }
+      
+      if (!audioFilePath) {
+        throw new Error('Audio file not found after download');
+      }
+      
+      // Merge using ffmpeg
+      tempFilePath = path.join(tempDir, `${baseFileName}_merged.mp4`);
+      console.log('Merging video and audio with ffmpeg...');
+      
+      const ffmpegCmd = `ffmpeg -i "${videoFilePath}" -i "${audioFilePath}" -c:v copy -c:a aac -strict experimental "${tempFilePath}" -y`;
+      console.log('FFmpeg command:', ffmpegCmd);
+      
       try {
-        // Execute download and wait for completion
-        console.log('Executing yt-dlp...');
-        await ytDlpWrap.execPromise(ytDlpArgs);
-        console.log('yt-dlp execution completed');
-      } catch (downloadError: any) {
-        console.error('yt-dlp download error:', downloadError);
-        throw new Error(`Download failed: ${downloadError.message || 'Unknown error'}`);
+        await execAsync(ffmpegCmd);
+        console.log('Merge complete');
+      } catch (ffmpegError: any) {
+        console.error('FFmpeg merge error:', ffmpegError);
+        throw new Error(`Failed to merge video and audio: ${ffmpegError.message}`);
       }
       
-      // Verify file exists
+      // Verify merged file exists
       if (!fs.existsSync(tempFilePath)) {
-        // Check if file was created with different extension
-        const possiblePaths = [
-          tempFilePath,
-          tempFilePath.replace('.mp4', '.mkv'),
-          tempFilePath.replace('.mp4', '.webm'),
-          `${tempFilePath}.part`
-        ];
-        
-        let foundPath: string | null = null;
-        for (const possiblePath of possiblePaths) {
-          if (fs.existsSync(possiblePath)) {
-            foundPath = possiblePath;
-            console.log('Found file at alternate path:', foundPath);
-            break;
-          }
-        }
-        
-        if (!foundPath) {
-          // List files in temp directory for debugging
-          const tempFiles = fs.readdirSync(tempDir).filter(f => f.includes(videoId) || f.includes(timestamp.toString()));
-          console.error('Expected file not found. Files in temp dir matching pattern:', tempFiles);
-          throw new Error(`Downloaded file not found at expected location: ${tempFilePath}`);
-        }
-        
-        tempFilePath = foundPath;
+        throw new Error('Merged file not found after ffmpeg processing');
       }
       
-      console.log('Video download and merge complete, reading file from:', tempFilePath);
-
-      // Read the merged file
+      console.log('Reading merged file...');
       const fileBuffer = fs.readFileSync(tempFilePath);
-      
-      console.log(`File size: ${fileBuffer.length} bytes`);
+      console.log(`Merged file size: ${fileBuffer.length} bytes`);
 
-      // Clean up temp file
-      fs.unlinkSync(tempFilePath);
+      // Clean up all temp files
+      if (videoFilePath && fs.existsSync(videoFilePath)) {
+        fs.unlinkSync(videoFilePath);
+      }
+      if (audioFilePath && fs.existsSync(audioFilePath)) {
+        fs.unlinkSync(audioFilePath);
+      }
+      if (tempFilePath && fs.existsSync(tempFilePath)) {
+        fs.unlinkSync(tempFilePath);
+      }
+      
       tempFilePath = null;
+      videoFilePath = null;
+      audioFilePath = null;
 
       // Return the merged video file
       const headers = new Headers();
@@ -238,12 +333,16 @@ export async function POST(request: NextRequest) {
   } catch (error: any) {
     console.error('Error downloading:', error);
     
-    // Clean up temp file if it exists
-    if (tempFilePath && fs.existsSync(tempFilePath)) {
-      try {
-        fs.unlinkSync(tempFilePath);
-      } catch (cleanupError) {
-        console.error('Error cleaning up temp file:', cleanupError);
+    // Clean up all temp files
+    const filesToClean = [tempFilePath, videoFilePath, audioFilePath];
+    for (const file of filesToClean) {
+      if (file && fs.existsSync(file)) {
+        try {
+          fs.unlinkSync(file);
+          console.log('Cleaned up:', file);
+        } catch (cleanupError) {
+          console.error('Error cleaning up file:', file, cleanupError);
+        }
       }
     }
     
