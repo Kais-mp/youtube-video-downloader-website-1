@@ -1,38 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import YTDlpWrap from 'yt-dlp-wrap';
-import path from 'path';
-import fs from 'fs';
-import os from 'os';
-
-// Store binary in tmp directory for serverless compatibility
-const binaryPath = path.join(os.tmpdir(), 'yt-dlp');
-
-// Ensure binary is downloaded (only once)
-let binaryReady = false;
-let downloadPromise: Promise<void> | null = null;
-
-async function ensureBinary() {
-  if (binaryReady) return;
-  
-  if (!downloadPromise) {
-    downloadPromise = (async () => {
-      try {
-        if (!fs.existsSync(binaryPath)) {
-          console.log('Downloading yt-dlp binary...');
-          await YTDlpWrap.downloadFromGithub(binaryPath);
-          fs.chmodSync(binaryPath, 0o755);
-          console.log('yt-dlp binary downloaded successfully');
-        }
-        binaryReady = true;
-      } catch (error) {
-        console.error('Failed to download yt-dlp:', error);
-        throw error;
-      }
-    })();
-  }
-  
-  await downloadPromise;
-}
+import ytdl from '@distube/ytdl-core';
 
 function extractVideoId(url: string): string | null {
   const patterns = [
@@ -44,6 +11,14 @@ function extractVideoId(url: string): string | null {
     if (match?.[1]) return match[1];
   }
   return null;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
 }
 
 export async function POST(request: NextRequest) {
@@ -58,20 +33,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Ensure binary is ready
-    await ensureBinary();
+    console.log('Fetching video info for:', videoId);
 
-    // Initialize yt-dlp with binary path
-    const ytDlpWrap = new YTDlpWrap(binaryPath);
-
-    console.log('Fetching video info with all formats...');
-
-    // Get video info using yt-dlp with all format details
-    const info: any = await ytDlpWrap.getVideoInfo([
-      url,
-      '--no-warnings',
-      '--no-playlist',
-    ]);
+    // Get video info using ytdl-core
+    const info = await ytdl.getInfo(url);
 
     // Extract available formats
     const formats = info.formats || [];
@@ -84,36 +49,36 @@ export async function POST(request: NextRequest) {
     
     formats.forEach((format: any) => {
       const height = format.height;
-      const hasVideo = format.vcodec && format.vcodec !== 'none';
-      const hasAudio = format.acodec && format.acodec !== 'none';
+      const hasVideo = format.hasVideo;
+      const hasAudio = format.hasAudio;
       
       // Track best audio-only format
       if (hasAudio && !hasVideo) {
-        if (!bestAudioFormat || (format.abr || 0) > (bestAudioFormat.abr || 0)) {
+        if (!bestAudioFormat || (format.audioBitrate || 0) > (bestAudioFormat.audioBitrate || 0)) {
           bestAudioFormat = format;
         }
       }
       
-      // Only process video formats
-      if (!height || !hasVideo) return;
+      // Only process video formats with reasonable height
+      if (!height || !hasVideo || height < 144) return;
       
       const quality = `${height}p`;
       const existing = qualityMap.get(quality);
       
-      // Calculate approximate size if not available
-      const filesize = format.filesize || format.filesize_approx || 0;
+      // Get file size
+      const filesize = parseInt(format.contentLength || '0');
       
-      // Prefer formats with both video and audio, or better quality/size
+      // Prefer formats with both video and audio
       if (!existing || (hasAudio && !existing.hasAudio) || filesize > existing.size) {
         qualityMap.set(quality, {
           quality,
           size: filesize,
-          itag: format.format_id,
-          container: format.ext || 'mp4',
+          itag: format.itag,
+          container: format.container || 'mp4',
           hasAudio,
           fps: format.fps || 30,
-          vcodec: format.vcodec,
-          acodec: format.acodec
+          vcodec: format.videoCodec || format.codecs,
+          acodec: format.audioCodec || (hasAudio ? 'audio' : 'none')
         });
       }
     });
@@ -123,19 +88,21 @@ export async function POST(request: NextRequest) {
       .sort((a, b) => parseInt(b.quality) - parseInt(a.quality));
 
     console.log('Available video qualities:', qualities.length);
-    console.log('Best audio format:', bestAudioFormat ? `${bestAudioFormat.abr}kbps` : 'none');
+    console.log('Best audio format:', bestAudioFormat ? `${bestAudioFormat.audioBitrate}kbps` : 'none');
+
+    const videoDetails = info.videoDetails;
 
     const videoInfo = {
-      title: info.title || 'Unknown Title',
-      thumbnail: info.thumbnail || info.thumbnails?.[0]?.url || '',
-      author: info.uploader || info.channel || 'Unknown',
-      duration: String(info.duration || 0),
+      title: videoDetails.title || 'Unknown Title',
+      thumbnail: videoDetails.thumbnails?.[videoDetails.thumbnails.length - 1]?.url || '',
+      author: videoDetails.author?.name || videoDetails.ownerChannelName || 'Unknown',
+      duration: String(videoDetails.lengthSeconds || 0),
       qualities: qualities,
       audioFormat: bestAudioFormat ? {
-        itag: bestAudioFormat.format_id,
-        abr: bestAudioFormat.abr || 128,
-        size: bestAudioFormat.filesize || bestAudioFormat.filesize_approx || 0,
-        container: bestAudioFormat.ext || 'm4a'
+        itag: bestAudioFormat.itag,
+        abr: bestAudioFormat.audioBitrate || 128,
+        size: parseInt(bestAudioFormat.contentLength || '0'),
+        container: bestAudioFormat.container || 'm4a'
       } : null
     };
 
