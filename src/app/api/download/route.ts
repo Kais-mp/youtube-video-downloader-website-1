@@ -1,10 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import ytdl from '@distube/ytdl-core';
-
-// Configure agent to bypass bot detection
-const agent = ytdl.createAgent(undefined, {
-  localAddress: undefined,
-});
 
 function extractVideoId(url: string): string | null {
   const patterns = [
@@ -18,18 +12,9 @@ function extractVideoId(url: string): string | null {
   return null;
 }
 
-// Sanitize filename for safe downloads
-function sanitizeFilename(filename: string): string {
-  return filename
-    .replace(/[^a-z0-9\s\-_]/gi, '_')
-    .replace(/\s+/g, '_')
-    .toLowerCase()
-    .substring(0, 200); // Limit filename length
-}
-
 export async function POST(request: NextRequest) {
   try {
-    const { url, itag, quality, downloadType = 'video' } = await request.json();
+    const { url, quality, format } = await request.json();
 
     const videoId = extractVideoId(url);
     if (!videoId) {
@@ -39,134 +24,114 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.log(`Downloading ${downloadType} ${videoId} with quality ${quality || itag}...`);
+    console.log('Downloading video:', videoId, 'Quality:', quality, 'Format:', format);
 
-    // Get video info with custom agent and headers
-    const info = await ytdl.getInfo(url, {
-      agent,
-      requestOptions: {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-          'Accept-Encoding': 'gzip, deflate, br',
-          'Connection': 'keep-alive',
-          'Upgrade-Insecure-Requests': '1',
-          'Sec-Fetch-Dest': 'document',
-          'Sec-Fetch-Mode': 'navigate',
-          'Sec-Fetch-Site': 'none',
-          'Sec-Fetch-User': '?1',
-          'Cache-Control': 'max-age=0'
-        }
-      }
-    });
+    // Use RapidAPI YouTube API to get download links
+    const apiKey = process.env.RAPIDAPI_KEY;
     
-    const title = info.videoDetails.title || 'video';
-    const sanitizedTitle = sanitizeFilename(title);
-    
-    let filename: string;
-    let contentType: string;
-    let format: any;
-
-    if (downloadType === 'audio' || downloadType === 'mp3') {
-      // Audio/MP3 download
-      filename = `${sanitizedTitle}.mp3`;
-      contentType = 'audio/mpeg';
-      
-      // Find best audio format
-      if (itag) {
-        format = ytdl.chooseFormat(info.formats, { quality: itag });
-      } else {
-        format = ytdl.chooseFormat(info.formats, { 
-          quality: 'highestaudio',
-          filter: 'audioonly'
-        });
-      }
-
-      console.log('Starting audio download with itag:', format.itag);
-
-    } else {
-      // Video download
-      filename = `${sanitizedTitle}.mp4`;
-      contentType = 'video/mp4';
-      
-      if (itag) {
-        // Use specific itag
-        format = ytdl.chooseFormat(info.formats, { quality: itag });
-      } else if (quality) {
-        // Choose format by quality (prefer formats with audio)
-        const height = parseInt(quality.replace('p', ''));
-        const availableFormats = info.formats.filter(f => 
-          f.hasVideo && f.height === height
-        );
-        
-        // Prefer formats with both video and audio
-        format = availableFormats.find(f => f.hasAudio && f.hasVideo) || 
-                 availableFormats.find(f => f.hasVideo) ||
-                 ytdl.chooseFormat(info.formats, { quality: 'highest' });
-      } else {
-        // Default to highest quality with audio
-        format = ytdl.chooseFormat(info.formats, { 
-          quality: 'highestvideo',
-          filter: format => format.hasVideo && format.hasAudio
-        });
-      }
-
-      console.log('Starting video download with itag:', format.itag, 'hasAudio:', format.hasAudio);
+    if (!apiKey) {
+      console.error('RAPIDAPI_KEY not configured');
+      return NextResponse.json(
+        { error: 'API configuration missing. Please set RAPIDAPI_KEY environment variable.' },
+        { status: 500 }
+      );
     }
 
-    // Create download stream with agent
-    const videoStream = ytdl.downloadFromInfo(info, { 
-      format,
-      agent,
-      requestOptions: {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    // Fetch video info with download links
+    const response = await fetch(`https://yt-api.p.rapidapi.com/dl?id=${videoId}`, {
+      method: 'GET',
+      headers: {
+        'x-rapidapi-key': apiKey,
+        'x-rapidapi-host': 'yt-api.p.rapidapi.com'
+      }
+    });
+
+    if (!response.ok) {
+      console.error('RapidAPI error:', response.status, response.statusText);
+      return NextResponse.json(
+        { error: `Failed to fetch download links: ${response.statusText}` },
+        { status: response.status }
+      );
+    }
+
+    const data = await response.json();
+
+    // Find the requested quality/format or use best available
+    let downloadUrl = '';
+    let filename = `${data.title || 'video'}.mp4`;
+
+    if (format === 'mp3' && data.audio) {
+      // Audio download
+      downloadUrl = data.audio.url || data.audio.downloadUrl;
+      filename = `${data.title || 'audio'}.mp3`;
+    } else if (data.formats) {
+      // Video download - find matching quality
+      const requestedHeight = parseInt(quality);
+      const matchingFormat = data.formats.find((f: any) => {
+        const height = f.height || parseInt(f.qualityLabel?.match(/(\d+)p/)?.[1] || '0');
+        return height === requestedHeight;
+      });
+
+      if (matchingFormat) {
+        downloadUrl = matchingFormat.url || matchingFormat.downloadUrl;
+      } else {
+        // Fallback to best quality
+        const sortedFormats = data.formats
+          .filter((f: any) => f.hasVideo !== false)
+          .sort((a: any, b: any) => {
+            const aHeight = a.height || parseInt(a.qualityLabel?.match(/(\d+)p/)?.[1] || '0');
+            const bHeight = b.height || parseInt(b.qualityLabel?.match(/(\d+)p/)?.[1] || '0');
+            return bHeight - aHeight;
+          });
+        
+        if (sortedFormats[0]) {
+          downloadUrl = sortedFormats[0].url || sortedFormats[0].downloadUrl;
         }
       }
-    });
+      
+      filename = `${data.title || 'video'}_${quality}.mp4`;
+    } else if (data.url || data.downloadUrl) {
+      // Direct download URL
+      downloadUrl = data.url || data.downloadUrl;
+    }
 
-    // Convert Node.js stream to Web ReadableStream
-    const webStream = new ReadableStream({
-      start(controller) {
-        videoStream.on('data', (chunk: Buffer) => {
-          controller.enqueue(new Uint8Array(chunk));
-        });
-        
-        videoStream.on('end', () => {
-          console.log('Download complete');
-          controller.close();
-        });
-        
-        videoStream.on('error', (error: Error) => {
-          console.error('Stream error:', error);
-          controller.error(error);
-        });
-      },
-      cancel() {
-        videoStream.destroy();
-      }
-    });
+    if (!downloadUrl) {
+      return NextResponse.json(
+        { error: 'No download URL available for this video' },
+        { status: 404 }
+      );
+    }
 
-    // Optimized headers for immediate download
+    // Stream the video from the download URL to the client
+    const videoResponse = await fetch(downloadUrl);
+    
+    if (!videoResponse.ok) {
+      return NextResponse.json(
+        { error: 'Failed to download video from source' },
+        { status: videoResponse.status }
+      );
+    }
+
+    // Stream the response back to client
     const headers = new Headers();
-    headers.set('Content-Type', contentType);
-    headers.set('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
-    headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-    headers.set('Pragma', 'no-cache');
-    headers.set('Expires', '0');
-    headers.set('X-Content-Type-Options', 'nosniff');
+    headers.set('Content-Type', format === 'mp3' ? 'audio/mpeg' : 'video/mp4');
+    headers.set('Content-Disposition', `attachment; filename="${filename}"`);
     
-    if (format.contentLength) {
-      headers.set('Content-Length', format.contentLength);
+    // Copy content-length if available
+    const contentLength = videoResponse.headers.get('content-length');
+    if (contentLength) {
+      headers.set('Content-Length', contentLength);
     }
 
-    return new NextResponse(webStream, { headers });
+    return new NextResponse(videoResponse.body, {
+      status: 200,
+      headers
+    });
 
   } catch (error: any) {
-    console.error('Error downloading:', error);
+    console.error('Error downloading video:', error);
     return NextResponse.json(
-      { error: `Failed to download: ${error.message}` },
+      { error: `Failed to download video: ${error.message}` },
       { status: 500 }
     );
   }

@@ -1,10 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import ytdl from '@distube/ytdl-core';
-
-// Configure agent to bypass bot detection
-const agent = ytdl.createAgent(undefined, {
-  localAddress: undefined,
-});
 
 function extractVideoId(url: string): string | null {
   const patterns = [
@@ -40,92 +34,90 @@ export async function POST(request: NextRequest) {
 
     console.log('Fetching video info for:', videoId);
 
-    // Get video info using ytdl-core with custom agent and headers
-    const info = await ytdl.getInfo(url, {
-      agent,
-      requestOptions: {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-          'Accept-Encoding': 'gzip, deflate, br',
-          'Connection': 'keep-alive',
-          'Upgrade-Insecure-Requests': '1',
-          'Sec-Fetch-Dest': 'document',
-          'Sec-Fetch-Mode': 'navigate',
-          'Sec-Fetch-Site': 'none',
-          'Sec-Fetch-User': '?1',
-          'Cache-Control': 'max-age=0'
-        }
+    // Use RapidAPI YouTube API to bypass bot detection
+    const apiKey = process.env.RAPIDAPI_KEY;
+    
+    if (!apiKey) {
+      console.error('RAPIDAPI_KEY not configured');
+      return NextResponse.json(
+        { error: 'API configuration missing. Please set RAPIDAPI_KEY environment variable.' },
+        { status: 500 }
+      );
+    }
+
+    const response = await fetch(`https://yt-api.p.rapidapi.com/dl?id=${videoId}`, {
+      method: 'GET',
+      headers: {
+        'x-rapidapi-key': apiKey,
+        'x-rapidapi-host': 'yt-api.p.rapidapi.com'
       }
     });
 
-    // Extract available formats
-    const formats = info.formats || [];
+    if (!response.ok) {
+      console.error('RapidAPI error:', response.status, response.statusText);
+      return NextResponse.json(
+        { error: `Failed to fetch video info: ${response.statusText}` },
+        { status: response.status }
+      );
+    }
+
+    const data = await response.json();
     
-    // Create quality map for video formats (with video codec)
-    const qualityMap = new Map<string, any>();
+    // Transform API response to match our existing format
+    const qualities = [];
     
-    // Track best audio format for MP3 download
-    let bestAudioFormat: any = null;
-    
-    formats.forEach((format: any) => {
-      const height = format.height;
-      const hasVideo = format.hasVideo;
-      const hasAudio = format.hasAudio;
+    // Parse video formats from API response
+    if (data.formats) {
+      const formatMap = new Map<string, any>();
       
-      // Track best audio-only format
-      if (hasAudio && !hasVideo) {
-        if (!bestAudioFormat || (format.audioBitrate || 0) > (bestAudioFormat.audioBitrate || 0)) {
-          bestAudioFormat = format;
+      data.formats.forEach((format: any) => {
+        const height = format.height || format.qualityLabel?.match(/(\d+)p/)?.[1];
+        if (!height || height < 144) return;
+        
+        const quality = `${height}p`;
+        const existing = formatMap.get(quality);
+        const filesize = format.filesize || format.contentLength || 0;
+        
+        if (!existing || filesize > existing.size) {
+          formatMap.set(quality, {
+            quality,
+            size: filesize,
+            itag: format.itag || format.formatId,
+            container: format.ext || 'mp4',
+            hasAudio: format.hasAudio !== false,
+            fps: format.fps || 30,
+            vcodec: format.vcodec || 'video',
+            acodec: format.acodec || 'audio'
+          });
         }
-      }
+      });
       
-      // Only process video formats with reasonable height
-      if (!height || !hasVideo || height < 144) return;
-      
-      const quality = `${height}p`;
-      const existing = qualityMap.get(quality);
-      
-      // Get file size
-      const filesize = parseInt(format.contentLength || '0');
-      
-      // Prefer formats with both video and audio
-      if (!existing || (hasAudio && !existing.hasAudio) || filesize > existing.size) {
-        qualityMap.set(quality, {
-          quality,
-          size: filesize,
-          itag: format.itag,
-          container: format.container || 'mp4',
-          hasAudio,
-          fps: format.fps || 30,
-          vcodec: format.videoCodec || format.codecs,
-          acodec: format.audioCodec || (hasAudio ? 'audio' : 'none')
-        });
-      }
-    });
+      qualities.push(...Array.from(formatMap.values())
+        .sort((a, b) => parseInt(b.quality) - parseInt(a.quality)));
+    }
 
-    // Convert to array and sort by quality (descending)
-    const qualities = Array.from(qualityMap.values())
-      .sort((a, b) => parseInt(b.quality) - parseInt(a.quality));
-
-    console.log('Available video qualities:', qualities.length);
-    console.log('Best audio format:', bestAudioFormat ? `${bestAudioFormat.audioBitrate}kbps` : 'none');
-
-    const videoDetails = info.videoDetails;
+    // If no formats parsed, create default qualities
+    if (qualities.length === 0) {
+      qualities.push(
+        { quality: '1080p', size: 0, itag: '137', container: 'mp4', hasAudio: true, fps: 30, vcodec: 'video', acodec: 'audio' },
+        { quality: '720p', size: 0, itag: '136', container: 'mp4', hasAudio: true, fps: 30, vcodec: 'video', acodec: 'audio' },
+        { quality: '480p', size: 0, itag: '135', container: 'mp4', hasAudio: true, fps: 30, vcodec: 'video', acodec: 'audio' },
+        { quality: '360p', size: 0, itag: '134', container: 'mp4', hasAudio: true, fps: 30, vcodec: 'video', acodec: 'audio' }
+      );
+    }
 
     const videoInfo = {
-      title: videoDetails.title || 'Unknown Title',
-      thumbnail: videoDetails.thumbnails?.[videoDetails.thumbnails.length - 1]?.url || '',
-      author: videoDetails.author?.name || videoDetails.ownerChannelName || 'Unknown',
-      duration: String(videoDetails.lengthSeconds || 0),
+      title: data.title || 'Unknown Title',
+      thumbnail: data.thumbnail || data.thumbnails?.[0]?.url || '',
+      author: data.author || data.uploader || 'Unknown',
+      duration: String(data.duration || data.lengthSeconds || 0),
       qualities: qualities,
-      audioFormat: bestAudioFormat ? {
-        itag: bestAudioFormat.itag,
-        abr: bestAudioFormat.audioBitrate || 128,
-        size: parseInt(bestAudioFormat.contentLength || '0'),
-        container: bestAudioFormat.container || 'm4a'
-      } : null
+      audioFormat: {
+        itag: 'audio',
+        abr: 128,
+        size: 0,
+        container: 'mp3'
+      }
     };
 
     return NextResponse.json(videoInfo);
