@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import ytdl from '@distube/ytdl-core';
 
+// Configure agent to bypass bot detection
+const agent = ytdl.createAgent(undefined, {
+  localAddress: undefined,
+});
+
 function extractVideoId(url: string): string | null {
   const patterns = [
     /(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/,
@@ -36,8 +41,26 @@ export async function POST(request: NextRequest) {
 
     console.log(`Downloading ${downloadType} ${videoId} with quality ${quality || itag}...`);
 
-    // Get video info
-    const info = await ytdl.getInfo(url);
+    // Get video info with custom agent and headers
+    const info = await ytdl.getInfo(url, {
+      agent,
+      requestOptions: {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Connection': 'keep-alive',
+          'Upgrade-Insecure-Requests': '1',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1',
+          'Cache-Control': 'max-age=0'
+        }
+      }
+    });
+    
     const title = info.videoDetails.title || 'video';
     const sanitizedTitle = sanitizeFilename(title);
     
@@ -92,8 +115,16 @@ export async function POST(request: NextRequest) {
       console.log('Starting video download with itag:', format.itag, 'hasAudio:', format.hasAudio);
     }
 
-    // Create download stream
-    const videoStream = ytdl.downloadFromInfo(info, { format });
+    // Create download stream with agent
+    const videoStream = ytdl.downloadFromInfo(info, { 
+      format,
+      agent,
+      requestOptions: {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+      }
+    });
 
     // Convert Node.js stream to Web ReadableStream
     const webStream = new ReadableStream({
